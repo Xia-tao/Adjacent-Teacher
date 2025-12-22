@@ -1,0 +1,408 @@
+import math
+import os
+
+import numpy as np
+import torch
+import cv2
+
+
+import torch
+
+
+class FreeMatchThresholding():
+    """
+    SAT in FreeMatch
+    """
+    def __init__(self, num_classes, momentum=0.999, use_quantile=True, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_classes = num_classes
+        self.m = momentum
+        self.use_quantile = use_quantile
+        
+        #self.p_model = torch.ones((self.num_classes)) / self.num_classes
+        #self.label_hist = torch.ones((self.num_classes)) / self.num_classes
+        self.p_model = torch.ones((self.num_classes)) * 0.2
+        self.label_hist = torch.ones((self.num_classes)) * 0.2
+        self.time_p = self.p_model.mean()
+    
+    @torch.no_grad()
+    def update(self, probs_x_ulb):
+        max_probs, max_idx = torch.max(probs_x_ulb, dim=-1,keepdim=True)
+
+        if self.use_quantile:
+            self.time_p = self.time_p * self.m + (1 - self.m) * torch.quantile(max_probs,0.8) #* max_probs.mean()
+        else:
+            self.time_p = self.time_p * self.m + (1 - self.m) * max_probs.mean()
+        
+        if False:
+            self.time_p = torch.clip(self.time_p, 0.2, 0.9)
+
+        print(probs_x_ulb.mean(dim=0))
+        self.p_model = self.p_model * self.m + (1 - self.m) * probs_x_ulb.mean(dim=0)
+        hist = torch.bincount(max_idx.reshape(-1), minlength=self.p_model.shape[0]).to(self.p_model.dtype) 
+        self.label_hist = self.label_hist * self.m + (1 - self.m) * (hist / hist.sum())
+
+    
+
+    @torch.no_grad()
+    def get_threshold(self, logits_x_ulb, softmax_x_ulb=True, *args, **kwargs):
+        if not self.p_model.is_cuda:
+            self.p_model = self.p_model.to(logits_x_ulb.device)
+        if not self.label_hist.is_cuda:
+            self.label_hist = self.label_hist.to(logits_x_ulb.device)
+        if not self.time_p.is_cuda:
+            self.time_p = self.time_p.to(logits_x_ulb.device)
+
+        if softmax_x_ulb:
+            probs_x_ulb = torch.softmax(logits_x_ulb.detach(), dim=-1)
+        else:
+            # logits is already probs
+            probs_x_ulb = logits_x_ulb.detach()
+
+        self.update(probs_x_ulb)
+
+        max_probs, max_idx = probs_x_ulb.max(dim=-1)
+        mod = self.p_model / torch.max(self.p_model, dim=-1)[0]
+        return self.time_p
+
+
+
+def draw_rotated_boxes(image, boxes, confs_cls, img_name):
+    PALETTE = [(165, 42, 42), (189, 183, 107), (0, 255, 0), (255, 0, 0),
+               (138, 43, 226), (255, 128, 0), (255, 0, 255), (0, 255, 255),
+               (255, 193, 193), (0, 51, 153), (255, 250, 205), (0, 139, 139),
+               (255, 255, 0), (147, 116, 116), (0, 0, 255), (22, 55, 166)]
+    for i, rotated_corners in enumerate(boxes):
+
+        # 将旋转框的角点坐标转换为整数类型
+        rotated_corners = np.array(rotated_corners).astype(np.int32)
+        if confs_cls[i][0] > 0.5:
+        # 在图像上绘制旋转框
+            cv2.polylines(image, [rotated_corners], True, PALETTE[int(confs_cls[i][-1])], thickness=3)
+        else:
+            cv2.polylines(image, [rotated_corners], True, PALETTE[int(confs_cls[i][-1])], thickness=1)
+        # 添加文字
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        text = str(int(confs_cls[i][-1]))
+        font_scale = 0.7
+        font_thickness = 1
+        text_x = int((rotated_corners[0][0]+rotated_corners[3][0])/2)
+        text_y = int((rotated_corners[0][1]+rotated_corners[3][1])/2)
+
+        cv2.putText(image, text, (text_x, text_y), font, font_scale, (0, 0, 255), font_thickness, cv2.LINE_AA)
+    # 显示图像
+    cv2.imwrite(os.path.join('wajue_targets', img_name), image)
+
+
+def draw_rotated_boxes2(image, boxes, confs_cls, img_name):
+    PALETTE = [(165, 42, 42), (189, 183, 107), (0, 255, 0), (255, 0, 0),
+               (138, 43, 226), (255, 128, 0), (255, 0, 255), (0, 255, 255),
+               (255, 193, 193), (0, 51, 153), (255, 250, 205), (0, 139, 139),
+               (255, 255, 0), (147, 116, 116), (0, 0, 255), (22, 55, 166)]
+    for i, rotated_corners in enumerate(boxes):
+
+        # 将旋转框的角点坐标转换为整数类型
+        rotated_corners = np.array(rotated_corners).astype(np.int32)
+        cv2.polylines(image, [rotated_corners], True, PALETTE[int(confs_cls[i][-1])], thickness=2)
+        # 添加文字
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        text = str(int(confs_cls[i][-1]))
+        font_scale = 0.7
+        font_thickness = 1
+        text_x = int((rotated_corners[0][0]+rotated_corners[3][0])/2)
+        text_y = int((rotated_corners[0][1]+rotated_corners[3][1])/2)
+
+        cv2.putText(image, text, (text_x, text_y), font, font_scale, (0, 0, 255), font_thickness, cv2.LINE_AA)
+    # 显示图像
+    cv2.imwrite(os.path.join('wajue_targets', img_name), image)
+
+
+
+def draw_rotated_boxes3(image, boxes, confs_cls, img_name):
+    for i, rotated_corners in enumerate(boxes):
+
+        # 将旋转框的角点坐标转换为整数类型
+        rotated_corners = np.array(rotated_corners).astype(np.int32)
+        cv2.polylines(image, [rotated_corners], True, (46, 208, 55), thickness=2)
+        # 添加文字
+        #font = cv2.FONT_HERSHEY_SIMPLEX
+        #text = str(int(confs_cls[i][-1]))
+        #font_scale = 0.7
+        #font_thickness = 1
+        #text_x = int((rotated_corners[0][0]+rotated_corners[3][0])/2)
+        #text_y = int((rotated_corners[0][1]+rotated_corners[3][1])/2)
+
+        #cv2.putText(image, text, (text_x, text_y), font, font_scale, (0, 0, 255), font_thickness, cv2.LINE_AA)
+    # 显示图像
+    cv2.imwrite(os.path.join('wajue_targets', img_name), image)
+
+
+def point_in_rect(x, y, vertices, gap=0.1):
+    def cross_product(x1, y1, x2, y2):
+        return x1 * y2 - x2 * y1
+
+    def is_point_inside_triangle(x, y, x1, y1, x2, y2, x3, y3):
+        # 判断点是否在三角形内部
+        b1 = cross_product(x - x1, y - y1, x2 - x1, y2 - y1) <= gap
+        b2 = cross_product(x - x2, y - y2, x3 - x2, y3 - y2) <= gap
+        b3 = cross_product(x - x3, y - y3, x1 - x3, y1 - y3) <= gap
+        return b1 == b2 == b3
+
+    # 四边形的四个顶点
+    x1, y1 = vertices[0]
+    x2, y2 = vertices[1]
+    x3, y3 = vertices[2]
+    x4, y4 = vertices[3]
+
+    # 判断点是否在四边形的两个三角形内
+    return is_point_inside_triangle(x, y, x1, y1, x2, y2, x3, y3) or is_point_inside_triangle(x, y, x1, y1, x3, y3, x4, y4)
+
+
+def interpolate_points(start_point, end_point, num_points):
+    # 获取起始点和结束点的坐标
+    x1, y1 = start_point
+    x2, y2 = end_point
+
+    # 计算斜率
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0:
+        slope = float('inf')
+    else:
+        slope = dy / dx
+
+    # 计算步长
+    step_size = 1.0 / (num_points + 1)
+
+    interpolated_points = []
+    for i in range(0, num_points + 1):
+        # 计算当前点的插值权重
+        weight = i * step_size
+
+        # 使用插值公式计算当前点的坐标
+        x = x1 + dx * weight
+        y = y1 + slope * dx * weight
+
+        # 将当前点的坐标添加到结果列表中
+        interpolated_points.append((x, y))
+    interpolated_points.append(end_point)
+    return interpolated_points
+
+def obb2poly_le90(rboxes):
+    """Convert oriented bounding boxes to polygons.
+
+    Args:
+        obbs (torch.Tensor): [x_ctr,y_ctr,w,h,angle]
+
+    Returns:
+        polys (torch.Tensor): [x0,y0,x1,y1,x2,y2,x3,y3]
+    """
+    N = rboxes.shape[0]
+    if N == 0:
+        return rboxes.new_zeros((rboxes.size(0), 8))
+    x_ctr, y_ctr, width, height, angle = rboxes.select(1, 0), rboxes.select(
+        1, 1), rboxes.select(1, 2), rboxes.select(1, 3), rboxes.select(1, 4)
+    tl_x, tl_y, br_x, br_y = \
+        -width * 0.5, -height * 0.5, \
+        width * 0.5, height * 0.5
+    rects = torch.stack([tl_x, br_x, br_x, tl_x, tl_y, tl_y, br_y, br_y],
+                        dim=0).reshape(2, 4, N).permute(2, 0, 1)
+    sin, cos = torch.sin(angle), torch.cos(angle)
+    M = torch.stack([cos, -sin, sin, cos], dim=0).reshape(2, 2,
+                                                          N).permute(2, 0, 1)
+    polys = M.matmul(rects).permute(2, 1, 0).reshape(-1, N).transpose(1, 0)
+    polys[:, ::2] += x_ctr.unsqueeze(1)
+    polys[:, 1::2] += y_ctr.unsqueeze(1)
+    return polys.contiguous()
+
+
+def get_nearest_similar_angle_boxes(targets, min_dis=200):
+    n = len(targets)
+    if n==0:
+        return []
+    #class_mapping_matrix = np.array([0,1,2,3,4,4,5,6,6,7,8,9,5,10,11,12])
+    #targets[:, -1] = class_mapping_matrix[targets[:, -1].astype('int64')]
+    distances = np.ones((n, n))*2048
+    # 遍历每个目标
+    for i in range(n):
+        target = targets[i]
+        x, y, w, h, a, s, c = target
+
+        # 初始化最小距离和最近的目标
+        min_distance = min_dis
+        nearest_target = None
+
+        # 遍历其他目标来找到最近的相同类别目标
+        for j in range(n):
+            if i != j:
+                other_target = targets[j]
+
+                # 如果类别相同，则计算距离
+                if c == other_target[-1]:
+                    other_x, other_y, other_w, other_h, _, other_s, _ = other_target
+                    if distances[i][j] != 2048:
+                        distance = distances[i][j]
+                    else:
+                        distance = math.sqrt((x - other_x) ** 2 + (y - other_y) ** 2)
+                        dy_thr = 2 * min(max(w,h), max(other_w,other_h))
+                        if distance > 700:
+                        #if distance > dy_thr:
+                           continue
+                        distance = get_distance(target, other_target, distance, True)
+                        distances[i][j] = distances[j][i] = distance
+
+                    # 更新最小距离和最近的目标
+                    if distance < min_distance:
+                        min_distance = distance
+                        nearest_target = other_target
+
+        # 如果存在相同类别的目标
+        if nearest_target is not None:
+
+            # 如果最近的目标的置信度较小，则将当前目标的角度设置为最近目标的角度
+            if s < nearest_target[-2]:
+                #angle_gap = abs(a-nearest_target[4])
+                #if angle_gap<0.15 or angle_gap>3.05:
+                #    targets[i][4] = nearest_target[4]
+                targets[i][4] = nearest_target[4]
+
+                #if int(c) in [4,7,8]:
+                    #[1,4,5,6,7,8] ap75 24.57 ap50 50.89 
+                #    targets[i][2] = nearest_target[2]
+                #    targets[i][3] = nearest_target[3]
+
+    return targets
+
+
+def get_distance(target, other_target, dis_ctr=None, return_ctr_dis = False):
+    if dis_ctr is None:
+        dis = math.sqrt((target[0] - other_target[0]) ** 2 + (target[1] - other_target[1]) ** 2)
+    else:
+        dis = dis_ctr
+    if return_ctr_dis:
+        return dis
+    t1 = target[:5]
+    t2 = other_target[:5]
+    ts = torch.tensor(np.concatenate((t1, t2)).reshape((-1, 5)))
+    boxs = obb2poly_le90(ts).view((-1, 4, 2))
+    x0 = t1[0]
+    y0 = t1[1]
+    x1 = t2[0]
+    y1 = t2[1]
+    line = interpolate_points((x0, y0), (x1, y1), int(dis / 10))
+    n = len(line)
+    f1 = False
+    f2 = False
+    for i, point in enumerate(line):
+        if (not f1) and point_in_rect(point[0], point[1], boxs[0]):
+            point1 = point
+            if point_in_rect(point[0], point[1], boxs[1]):
+                dis_no_overlap = 0
+                break
+        else:
+            f1 = True
+        if (not f2) and point_in_rect(line[n - 1 - i][0], line[n - 1 - i][1], boxs[1]):
+            point2 = line[n - 1 - i]
+        else:
+            f2 = True
+        if f1 and f2:
+            dis_no_overlap = math.sqrt((point2[0] - point1[0]) ** 2 + (point2[1] - point1[1]) ** 2)
+            break
+    return dis_no_overlap
+
+
+def get_valid_bboxs_no_train(all_bboxs, dis_gap_thr, angle_gap_thr, conf_thr = 0.5, device=None):
+    class_mapping_matrix = torch.tensor([0,1,2,3,4,4,5,6,6,7,8,9,5,10,11,12]).to(device)
+    #class_mapping_matrix = torch.tensor([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]).to(device)
+    conf_threshold = conf_thr  # 置信度阈值
+    distance_threshold = dis_gap_thr  # 距离阈值
+    data = all_bboxs
+
+    high_confidence_targets = []  # 存储大于conf_thr置信度的目标
+    low_confidence_targets = []  # 存储小于conf_thr置信度的目标
+
+    # 遍历目标数据
+    for target in data:
+        confidence = target[5]  # 获取目标的置信度
+
+        if confidence >= conf_threshold:
+            high_confidence_targets.append(target)  # 将大于阈值的目标添加到高置信度目标组中
+        else:
+            low_confidence_targets.append(target)  # 将小于等于阈值的目标添加到低置信度目标组中
+
+    # 对高置信度目标组按置信度进行降序排序
+    if len(high_confidence_targets)==0 or len(low_confidence_targets)==0:
+        return all_bboxs
+    high_org = high_confidence_targets
+    high_confidence_targets = sorted(high_confidence_targets, key=lambda x: x[5], reverse=True)
+    targets_removed = []  # 存储要添加到高置信度目标组的目标
+    # 遍历高置信度目标组
+    for high_conf_target in high_confidence_targets:
+
+        targets_to_add = []  # 存储要添加到高置信度目标组的目标
+
+
+        # 遍历低置信度目标组
+        for i, low_conf_target in enumerate(low_confidence_targets):
+            if i in targets_removed:
+                continue
+            if class_mapping_matrix[int(low_conf_target[-1])] != class_mapping_matrix[int(high_conf_target[-1])]:
+                continue
+
+
+            # 计算高置信度目标和低置信度目标之间的距离
+            distance = get_distance(high_conf_target, low_conf_target, return_ctr_dis=True)
+            distance_threshold = 2*min(max(high_conf_target[2],high_conf_target[3]), max(low_conf_target[2], low_conf_target[3]))
+            if distance < distance_threshold: #距离约束
+                if abs(high_conf_target[4])+abs(low_conf_target[4]) > 3.04:
+                    angle_gap = 0
+                else:
+                    angle_gap = abs(high_conf_target[4]-low_conf_target[4])
+                if angle_gap < angle_gap_thr: #角度约束
+                    low_confidence_targets[i][5] = (high_conf_target[5]+low_confidence_targets[i][5])/2
+                    low_confidence_targets[i][4] = (high_conf_target[4]+low_confidence_targets[i][4])/2
+                    low_confidence_targets[i][4] = high_conf_target[4]
+                    targets_to_add.append(low_conf_target)  # 将距离小于阈值的低置信度目标添加到要添加的目标列表
+                    targets_removed.append(i)
+        high_confidence_targets.extend(targets_to_add)  # 将要添加的目标列表扩展到高置信度目标组中
+    return np.vstack((np.array(high_org), np.array(low_confidence_targets)))
+
+
+def get_valid_bboxs3(all_bboxs, dis_gap_thr=200, angle_gap_thr=0.15, conf_thr=0.5, device=None):
+    #dota1.5
+    class_mapping_matrix = torch.tensor([0,1,2,3,4,4,5,6,6,7,8,9,5,10,11,12]).to(device)
+    class_mapping_matrix2 = torch.tensor([0,1,2,3,4,4,5,6,6,7,8,9,5,10,11,12]).to(device)
+
+    conf_threshold = conf_thr  # 置信度阈值
+    distance_threshold = dis_gap_thr  # 距离阈值
+    all_bboxs = torch.tensor(all_bboxs).to(device)  # Convert input to PyTorch tensor
+    high_conf_bboxs = all_bboxs[all_bboxs[:, -2] >= conf_threshold]
+    low_conf_bboxs = all_bboxs[all_bboxs[:, -2] < conf_threshold]
+    high_conf_xys = high_conf_bboxs[:, :2]
+    low_conf_xys = low_conf_bboxs[:, :2]
+    n_low = len(low_conf_xys)
+    n_high = len(high_conf_xys)
+    high_conf_cls = class_mapping_matrix[high_conf_bboxs[:, -1].to(torch.long)].view(n_high, 1)
+    low_conf_cls = class_mapping_matrix2[low_conf_bboxs[:, -1].to(torch.long)].view(1, n_low)
+    high_conf_angle = high_conf_bboxs[:, -3].view(n_high, 1)
+    low_conf_angle = low_conf_bboxs[:, -3].view(1, n_low)
+    high_conf_xys = high_conf_xys.repeat(1, n_low)
+    low_conf_xys = low_conf_xys.reshape((1, n_low * 2)).repeat(n_high, 1)
+    gap_suare = torch.pow(high_conf_xys - low_conf_xys, 2)
+    if dis_gap_thr is not None:
+        distance_threshold = dis_gap_thr  # 距离阈值
+    else:
+        high_conf_whs = high_conf_bboxs[:, 2:4]
+        low_conf_whs = low_conf_bboxs[:, 2:4] #3 50.3 4 50.1
+        distance_threshold = 2 * torch.cat([low_conf_whs.max(1, keepdim=True)[0].view(1, n_low).repeat(n_high, 1).reshape((n_high, n_low, 1)),
+                                        high_conf_whs.max(1, keepdim=True)[0].view(n_high, 1).repeat(1, n_low).reshape((n_high, n_low, 1))], dim=2).min(2)[0]
+    distances_map = torch.sqrt(gap_suare[:, ::2] + gap_suare[:, 1::2]) < distance_threshold
+    classes_map = high_conf_cls.repeat(1, n_low) == low_conf_cls.repeat(n_high, 1)
+    #classes_map_boat = classes_map * (high_conf_cls.repeat(1, n_low)==5)
+    gap_angle = torch.abs(high_conf_angle.repeat(1, n_low) - low_conf_angle.repeat(n_high, 1))
+    angle_map = (gap_angle < angle_gap_thr) | (gap_angle > 3.04)
+    #angle_map_boat = ((gap_angle>=1.52) * (gap_angle<=1.62))
+    target_to_add_index = (distances_map * classes_map * angle_map).any(dim=0)
+    #target_to_add_index = (distances_map * ((classes_map * angle_map)|(angle_map_boat * classes_map_boat))).any(dim=0)
+    res = torch.cat([high_conf_bboxs, low_conf_bboxs[target_to_add_index]], dim=0)
+    return np.array(res.cpu())  # Convert the result back to NumPy array
